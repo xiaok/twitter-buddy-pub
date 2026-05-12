@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const config = require("./config");
+const { getBrowser, closeBrowser } = require("./browser");
 
 let _externalLog = null;
 
@@ -318,8 +319,34 @@ function saveTweets(tweets, outputDir) {
   return savedFiles[0] || null;
 }
 
-// 导出供 daemon.js 使用
-module.exports = { navigateToTimeline, collectTweets, saveTweets, log, setLogger, clearLogger };
+/**
+ * 启动浏览器（带反检测）
+ */
+async function launchBrowser(chromeDataDir) {
+  return getBrowser(chromeDataDir ? { userDataDir: chromeDataDir } : {});
+}
+
+/**
+ * 采集 Following 时间线：优先快速 API，兜底滚动
+ */
+async function collectFollowingTimeline(page, options = {}) {
+  if (config.xFast?.enabled && !options.forceScroll) {
+    try {
+      log("Trying fast X Following collection ...");
+      const { collectFastTimeline } = require("./x-adapters");
+      const result = await collectFastTimeline(page, { source: "following", count: config.xFast.count });
+      log(`Fast collection complete: ${result.tweets.length} tweets`);
+      return result;
+    } catch (err) {
+      log(`Fast collection failed, falling back to scroll: ${err.message}`);
+    }
+  }
+
+  await navigateToTimeline(page);
+  return collectTweets(page, options);
+}
+
+module.exports = { clearLogger, collectFollowingTimeline, launchBrowser, navigateToTimeline, collectTweets, saveTweets, setLogger, log };
 
 // CLI 模式：直接运行
 if (require.main === module) {

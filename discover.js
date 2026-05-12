@@ -4,6 +4,7 @@ const config = require("./config");
 const { collectTweets, saveTweets, log } = require("./collect-timeline");
 const { getBrowser, closeBrowser } = require("./browser");
 const { callClaude } = require("./claude-cli");
+const { collectFastTimeline } = require("./x-adapters");
 
 // ========== 用户评分系统 ==========
 
@@ -583,21 +584,53 @@ async function runDiscover(options = {}) {
   const page = browser.pages()[0] || (await browser.newPage());
 
   try {
-    await navigateToForYou(page);
+    let result;
 
-    const result = await collectTweets(page, { maxScrolls });
+    // 阶段 1: 尝试快速 API 采集（x-adapters 通过 X 内部 GraphQL 一次性拉取，支持 following 字段）
+    if (config.xFast?.enabled) {
+      try {
+        log("[discover] Trying fast X For You collection ...");
+        result = await collectFastTimeline(page, { source: "for_you", count: Math.min(maxScrolls, config.xFast.maxCount || 50) });
+        log(`[discover] Fast collection complete: ${result.tweets.length} tweets`);
+      } catch (err) {
+        log(`[discover] Fast collection failed, falling back to scroll: ${err.message}`);
+      }
+    }
+
+    // 阶段 2: 兜底滚动采集
+    if (!result) {
+      await navigateToForYou(page);
+      result = await collectTweets(page, { maxScrolls });
+    }
 
     if (result.tweets.length === 0) {
       log("[discover] No tweets collected.");
       return null;
     }
 
-    // 检测每个用户的关注状态（通过访问用户主页）
-    const followMap = await checkFollowStatusBatch(page, result.tweets);
-    for (const t of result.tweets) {
-      const handle = extractHandle(t.user);
-      if (handle && followMap[handle.toLowerCase()] != null) {
-        t.isFollowed = followMap[handle.toLowerCase()];
+    // 阶段 3: 关注状态检测——优先用 API 返回的已知状态，再悬停+主页兜底
+    const knownCount = result.tweets.filter(t => t.isFollowed !== null).length;
+    const unknownTweets = result.tweets.filter(t => t.isFollowed === null);
+
+    if (knownCount > 0 && unknownTweets.length === 0) {
+      log(`[discover] Follow status already known for all ${knownCount} users (from API), skipping browser follow check.`);
+    } else if (unknownTweets.length > 0) {
+      log(`[discover] ${knownCount} known from API, checking follow status for ${unknownTweets.length} remaining users ...`);
+      const followMap = await checkFollowStatusBatch(page, unknownTweets);
+      for (const t of unknownTweets) {
+        const handle = extractHandle(t.user);
+        if (handle && followMap[handle.toLowerCase()] != null) {
+          t.isFollowed = followMap[handle.toLowerCase()];
+        }
+      }
+    } else {
+      log(`[discover] No follow status from API, checking via browser ...`);
+      const followMap = await checkFollowStatusBatch(page, result.tweets);
+      for (const t of result.tweets) {
+        const handle = extractHandle(t.user);
+        if (handle && followMap[handle.toLowerCase()] != null) {
+          t.isFollowed = followMap[handle.toLowerCase()];
+        }
       }
     }
 

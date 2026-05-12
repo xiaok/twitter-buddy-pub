@@ -17,6 +17,12 @@ module.exports = {
     staleLimit: 10,
   },
 
+  xFast: {
+    enabled: true,
+    count: 40,
+    maxCount: 50,
+  },
+
   // 守护进程配置
   daemon: {
     intervalMin: 5 * 60 * 1000,   // 最短间隔 5 分钟
